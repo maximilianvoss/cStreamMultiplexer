@@ -6,6 +6,7 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <stdio.h>
+#include <fcntl.h>
 #include "client.h"
 #include "server.h"
 #include "config.h"
@@ -90,6 +91,7 @@ int main(int argc, char **argv) {
 	struct sockaddr_in clientname;
 	char buffer[BUFFER_SIZE];
 	int socket;
+	int namedPipe;
 	int i;
 
 	signal(13, (void *) 1);
@@ -97,7 +99,7 @@ int main(int argc, char **argv) {
 	set_conio_terminal_mode();
 	memset(&registeredSockets, '\0', sizeof(int) * MAX_CONNECTIONS);
 
-	if ( argc == 2 ) {
+	if ( argc == 2 || argc == 3 ) {
 		if ( !strcmp(argv[1], "client") ) {
 			isClient = true;
 			isServer = false;
@@ -114,6 +116,12 @@ int main(int argc, char **argv) {
 	FD_ZERO (&active_fd_set);
 	FD_SET(STDIN_FILENO, &active_fd_set);
 	registerSocket(STDOUT_FILENO);
+
+	if ( argc == 3 ) {
+		namedPipe = open(argv[2], O_RDWR);
+		FD_SET(namedPipe, &active_fd_set);
+		registerSocket(namedPipe);
+	}
 
 	if ( isClient ) {
 		socket = client_connect();
@@ -153,11 +161,16 @@ int main(int argc, char **argv) {
 						FD_CLR (i, &active_fd_set);
 						unregisterSocket(i);
 					} else {
-						distributeMessage(i, buffer);
-						if ( !strcmp(buffer, "q") ) {
-							fprintf(stderr, "Gonna quit\n");
+						if ( !strcmp(buffer, "!Me:Quit!") ) {
+							distributeMessage(i, buffer);
+							fprintf(stderr, "!Me:Qutting!\n");
 							closeSockets(socket);
 							hasToQuit = true;
+						} else if ( !strcmp(buffer, "!Me:Status!") ) {
+							distributeMessage(i, buffer);
+							distributeMessage(i, "!Me:Running!");
+						} else {
+							distributeMessage(i, buffer);
 						}
 					}
 				}
@@ -166,5 +179,8 @@ int main(int argc, char **argv) {
 	}
 
 	close(socket);
+	if ( argc == 3 ) {
+		close(namedPipe);
+	}
 	return 0;
 }
