@@ -11,5 +11,8 @@ project(cStreamMultiplexer)
 #SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Os")
 #SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Os")
 
-set(SOURCE_FILES server.c server.h client.c client.h cstreammultiplexer.c config.h)
-add_executable(cstreammultiplexer ${SOURCE_FILES})
+add_subdirectory(examples)
+
+
+set(SOURCE_FILES cstreammultiplexer.c terminal.c terminal.h)
+add_library(cstreammultiplexer ${SOURCE_FILES})

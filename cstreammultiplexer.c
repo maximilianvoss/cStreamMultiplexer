@@ -1,59 +1,42 @@
-#include <sys/termios.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdbool.h>
-#include <sys/socket.h>
-#include <arpa/inet.h>
-#include <stdio.h>
-#include <fcntl.h>
-#include "client.h"
-#include "server.h"
-#include "config.h"
+#include "cstreammultiplexer.h"
 
-struct termios orig_termios;
-int registeredSockets[MAX_CONNECTIONS];
+static int registeredSockets[SOCKETS];
+static void csm_distributeMessage(int source, char *msg);
 
-void reset_terminal_mode() {
-	tcsetattr(0, TCSANOW, &orig_termios);
+void csm_reset_sockets() {
+	memset(&registeredSockets, 0, sizeof(int) * SOCKETS);
 }
 
-void set_conio_terminal_mode() {
-	struct termios new_termios;
-
-	tcgetattr(0, &orig_termios);
-	memcpy(&new_termios, &orig_termios, sizeof(new_termios));
-
-	atexit(reset_terminal_mode);
-	cfmakeraw(&new_termios);
-	tcsetattr(0, TCSANOW, &new_termios);
-}
-
-int readFromDescriptor(int filedes, char *buffer) {
-	int size;
-	memset(buffer, '\0', BUFFER_SIZE);
-	size = read(filedes, buffer, BUFFER_SIZE);
+bool csm_readFromDescriptor(int filedes, char *buffer, size_t buffer_size) {
+	ssize_t size;
+	memset(buffer, '\0', buffer_size);
+	size = read(filedes, buffer, buffer_size);
 	if ( size < 0 ) {
-		return -1;
+		return false;
 	} else if ( size == 0 ) {
-		return -1;
+		return false;
 	}
-	return 0;
+	return true;
 }
 
-void registerSocket(int socket) {
+bool csm_registerSocket(int socket) {
 	int i;
-	for ( i = 0; i < MAX_CONNECTIONS + 1; i++ ) {
+	for ( i = 0; i < SOCKETS; i++ ) {
 		if ( registeredSockets[i] == 0 ) {
 			registeredSockets[i] = socket;
-			return;
+			return true;
 		}
 	}
+	return false;
 }
 
-void unregisterSocket(int socket) {
+void csm_unregisterSocket(int socket) {
 	int i;
-	for ( i = 0; i < MAX_CONNECTIONS + 1; i++ ) {
+	for ( i = 0; i < SOCKETS; i++ ) {
 		if ( registeredSockets[i] == socket ) {
 			registeredSockets[i] = 0;
 			return;
@@ -61,11 +44,11 @@ void unregisterSocket(int socket) {
 	}
 }
 
-void closeSockets(int socket) {
+void csm_closeSockets() {
 	int i;
-	for ( i = 0; i < MAX_CONNECTIONS + 1; i++ ) {
+	for ( i = 0; i < SOCKETS; i++ ) {
 		if ( registeredSockets[i] != 0 ) {
-			if ( registeredSockets[i] != STDIN_FILENO && registeredSockets[i] != STDOUT_FILENO && registeredSockets[i] != socket ) {
+			if ( registeredSockets[i] != STDIN_FILENO && registeredSockets[i] != STDOUT_FILENO && registeredSockets[i] != STDERR_FILENO ) {
 				close(registeredSockets[i]);
 			}
 			registeredSockets[i] = 0;
@@ -73,114 +56,31 @@ void closeSockets(int socket) {
 	}
 }
 
-void distributeMessage(int source, char *msg) {
+static void csm_distributeMessage(int source, char *msg) {
 	int i;
-	for ( i = 0; i < MAX_CONNECTIONS + 1; i++ ) {
+	for ( i = 0; i < SOCKETS; i++ ) {
 		if ( registeredSockets[i] != source && registeredSockets[i] != 0 ) {
 			write(registeredSockets[i], msg, strlen(msg));
 		}
 	}
 }
 
-int main(int argc, char **argv) {
-	bool isClient = false;
-	bool isServer = false;
-	bool hasToQuit = false;
-	fd_set active_fd_set;
-	fd_set read_fd_set;
-	struct sockaddr_in clientname;
-	char buffer[BUFFER_SIZE];
-	int socket;
-	int namedPipe;
-	int i;
-
-	signal(13, (void *) 1);
-
-	set_conio_terminal_mode();
-	memset(&registeredSockets, '\0', sizeof(int) * MAX_CONNECTIONS);
-
-	if ( argc == 2 || argc == 3 ) {
-		if ( !strcmp(argv[1], "client") ) {
-			isClient = true;
-			isServer = false;
-		} else if ( !strcmp(argv[1], "server") ) {
-			isClient = false;
-			isServer = true;
+bool csm_messageCall(fd_set *active_fd_set, int source, char *buffer, size_t buffer_size) {
+	if ( csm_readFromDescriptor(source, buffer, buffer_size) == false ) {
+		close(source);
+		FD_CLR (source, active_fd_set);
+		csm_unregisterSocket(source);
+	} else {
+		if ( !strcmp(buffer, CMD_QUIT) ) {
+			csm_distributeMessage(source, buffer);
+			csm_closeSockets();
+			return false;
+		} else if ( !strcmp(buffer, CMD_STATUS) ) {
+			csm_distributeMessage(source, CMD_STATUS);
+			csm_distributeMessage(source, RESP_STATUS);
+		} else {
+			csm_distributeMessage(source, buffer);
 		}
 	}
-	if ( isClient == false && isServer == false ) {
-		fprintf(stderr, "Error: argument is missing\n");
-		return 1;
-	}
-
-	FD_ZERO (&active_fd_set);
-	FD_SET(STDIN_FILENO, &active_fd_set);
-	registerSocket(STDOUT_FILENO);
-
-	if ( argc == 3 ) {
-		namedPipe = open(argv[2], O_RDWR);
-		FD_SET(namedPipe, &active_fd_set);
-		registerSocket(namedPipe);
-	}
-
-	if ( isClient ) {
-		socket = client_connect();
-	} else if ( isServer ) {
-		socket = server_connect();
-	}
-	if ( socket < 0 ) {
-		fprintf(stderr, "Error: open socket\n");
-		return 1;
-	}
-	FD_SET(socket, &active_fd_set);
-	registerSocket(socket);
-
-	while ( !hasToQuit ) {
-		read_fd_set = active_fd_set;
-		if ( select(FD_SETSIZE, &read_fd_set, NULL, NULL, NULL) < 0 ) {
-			fprintf(stderr, "Error: select\n");
-			close(socket);
-			return 1;
-		}
-		for ( i = 0; i < FD_SETSIZE; i++ ) {
-			if ( FD_ISSET (i, &read_fd_set) ) {
-				if ( isServer && i == socket ) {
-					socklen_t size = sizeof(clientname);
-					int newClient = accept(socket, (struct sockaddr *) &clientname, &size);
-					if ( newClient < 0 ) {
-						fprintf(stderr, "Error: accept\n");
-						close(socket);
-						exit(EXIT_FAILURE);
-					}
-					FD_SET (newClient, &active_fd_set);
-					registerSocket(newClient);
-				} else {
-					if ( readFromDescriptor(i, buffer) < 0 ) {
-						fprintf(stderr, "Error: read\n");
-						close(i);
-						FD_CLR (i, &active_fd_set);
-						unregisterSocket(i);
-					} else {
-						if ( !strcmp(buffer, "!Me:Quit!") ) {
-							distributeMessage(i, buffer);
-							fprintf(stderr, "!Me:Qutting!\n");
-							closeSockets(socket);
-							hasToQuit = true;
-						} else if ( !strcmp(buffer, "!Me:Status!") ) {
-							distributeMessage(i, buffer);
-							distributeMessage(i, "!Me:Running!");
-						} else {
-							distributeMessage(i, buffer);
-						}
-					}
-				}
-			}
-		}
-	}
-
-	close(socket);
-	if ( argc == 3 ) {
-		close(namedPipe);
-	}
-	return 0;
+	return true;
 }
